@@ -2,7 +2,6 @@ package meilisearchprojection
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/dogmatiq/dogma"
@@ -15,13 +14,13 @@ import (
 // adaptor adapts a boltprojection.ProjectionMessageHandler to the
 // dogma.ProjectionMessageHandler interface.
 type adaptor struct {
-	index   meilisearch.IndexManager
+	db      meilisearch.ServiceManager
 	handler MessageHandler
 	repo    *ResourceRepository
 }
 
 // New returns a new Dogma projection message handler by binding a
-// BoltDB-specific projection handler to a BoltDB database.
+// Meilisearch-specific projection handler to a Meilisearch database.
 //
 // If db is nil the returned handler will return an error whenever an operation
 // that requires the database is performed.
@@ -34,13 +33,24 @@ func New(
 		return unboundhandler.New(h)
 	}
 
-	index, err := db.GetIndex(occTable)
+	_, err := db.GetIndex(occTable)
 	if err != nil {
-		return unboundhandler.New(h)
+		// occTable does not exist, create it
+		task, err := db.CreateIndex(&meilisearch.IndexConfig{
+			Uid:        occTable,
+			PrimaryKey: "id",
+		})
+		if err != nil {
+			return unboundhandler.New(h)
+		}
+		err = waitForTask(context.Background(), db, task.TaskUID)
+		if err != nil {
+			return unboundhandler.New(h)
+		}
 	}
 
 	return &adaptor{
-		index:   index,
+		db:      db,
 		handler: h,
 		repo: NewResourceRepository(
 			db,
@@ -75,9 +85,8 @@ func (a *adaptor) HandleEvent(
 			return true, nil
 		},
 	)
-
 	if err != nil {
-		fmt.Println(err)
+		return false, err
 	}
 
 	return ok, err
@@ -103,11 +112,11 @@ func (a *adaptor) TimeoutHint(m dogma.Event) time.Duration {
 
 // Compact reduces the size of the projection's data.
 func (a *adaptor) Compact(ctx context.Context, s dogma.ProjectionCompactScope) error {
-	return a.handler.Compact(ctx, a.index, s)
+	return a.handler.Compact(ctx, a.db, s)
 }
 
 // ResourceRepository returns a repository that can be used to manipulate the
 // handler's resource versions.
-func (a *adaptor) ResourceRepository() resource.Repository {
-	return a.repo
+func (a *adaptor) ResourceRepository(context.Context) (resource.Repository, error) {
+	return a.repo, nil
 }

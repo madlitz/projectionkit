@@ -13,6 +13,9 @@ require (
 	github.com/dogmatiq/dogma v0.14.2
 	github.com/dogmatiq/enginekit v0.11.0
 	github.com/dogmatiq/sqltest v0.3.0
+	github.com/google/uuid v1.6.0
+	github.com/meilisearch/meilisearch-go v0.28.0
+	github.com/neo4j/neo4j-go-driver/v5 v5.25.0
 	github.com/onsi/ginkgo v1.16.5
 	github.com/onsi/gomega v1.34.2
 	go.etcd.io/bbolt v1.3.11
@@ -49,8 +52,6 @@ require (
 	github.com/lib/pq v1.10.2 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mattn/go-sqlite3 v1.14.5 // indirect
-	github.com/meilisearch/meilisearch-go v0.28.0 // indirect
-	github.com/neo4j/neo4j-go-driver/v5 v5.25.0 // indirect
 	github.com/nxadm/tail v1.4.8 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	golang.org/x/crypto v0.26.0 // indirect

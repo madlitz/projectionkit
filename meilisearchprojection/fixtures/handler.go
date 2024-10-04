@@ -11,7 +11,7 @@ import (
 // MessageHandler is a test implementation of boltdb.MessageHandler.
 type MessageHandler struct {
 	ConfigureFunc   func(c dogma.ProjectionConfigurer)
-	HandleEventFunc func(context.Context, meilisearch.ServiceManager, dogma.ProjectionEventScope, dogma.Event) error
+	HandleEventFunc func(context.Context, meilisearch.IndexManager, dogma.ProjectionEventScope, dogma.Event) error
 	TimeoutHintFunc func(m dogma.Event) time.Duration
 	CompactFunc     func(context.Context, meilisearch.ServiceManager, dogma.ProjectionCompactScope) error
 }
@@ -35,7 +35,7 @@ func (h *MessageHandler) Configure(c dogma.ProjectionConfigurer) {
 // If h.HandleEventFunc is non-nil it returns h.HandleEventFunc(ctx, tx, s, m).
 func (h *MessageHandler) HandleEvent(
 	ctx context.Context,
-	tx meilisearch.ServiceManager,
+	tx meilisearch.IndexManager,
 	s dogma.ProjectionEventScope,
 	m dogma.Event,
 ) error {

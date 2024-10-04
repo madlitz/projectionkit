@@ -3,6 +3,7 @@ package meilisearchprojection_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/dogmatiq/dogma"
@@ -37,10 +38,13 @@ var _ = Describe("type adaptor", func() {
 		}
 
 		adaptor = New(db, handler, "projection_occ")
+
 	})
 
 	AfterEach(func() {
-		_, err := db.DeleteIndexWithContext(ctx, "projection_occ")
+		task, err := db.DeleteIndexWithContext(ctx, "projection_occ")
+		Expect(err).ShouldNot(HaveOccurred())
+		err = waitForTask(ctx, db, task.TaskUID)
 		Expect(err).ShouldNot(HaveOccurred())
 		db.Close()
 		cancel()
@@ -60,7 +64,7 @@ var _ = Describe("type adaptor", func() {
 
 			handler.HandleEventFunc = func(
 				context.Context,
-				meilisearch.ServiceManager,
+				meilisearch.IndexManager,
 				dogma.ProjectionEventScope,
 				dogma.Event,
 			) error {
@@ -98,3 +102,19 @@ var _ = Describe("type adaptor", func() {
 		})
 	})
 })
+
+func waitForTask(ctx context.Context, db meilisearch.ServiceManager, taskID int64) error {
+	for {
+		task, err := db.GetTaskWithContext(ctx, taskID)
+		if err != nil {
+			return err
+		}
+		if task.Status == "succeeded" {
+			return nil
+		}
+		if task.Status == "failed" {
+			return fmt.Errorf("task failed: %v", task.Error)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}

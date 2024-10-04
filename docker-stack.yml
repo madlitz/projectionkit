@@ -5,3 +5,8 @@ services:
     image: amazon/dynamodb-local
     ports:
       - "28000:8000/tcp"
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.10.0
+    ports:
+      - "7700:7700/tcp"

@@ -193,6 +193,7 @@ func DescribeAdaptor[T dogma.ProjectionMessageHandler](
 				context.Background(),
 				[]byte("<resource>"),
 			)
+
 			gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 			gomega.Expect(v).To(gomega.BeEmpty())
 		})

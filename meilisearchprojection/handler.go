@@ -50,7 +50,7 @@ type MessageHandler interface {
 	// UnexpectedMessage value.
 	//
 	// The engine MAY call HandleEvent() from multiple goroutines concurrently.
-	HandleEvent(ctx context.Context, db meilisearch.ServiceManager, s dogma.ProjectionEventScope, m dogma.Event) error
+	HandleEvent(ctx context.Context, db meilisearch.IndexManager, s dogma.ProjectionEventScope, m dogma.Event) error
 
 	// TimeoutHint returns a duration that is suitable for computing a deadline
 	// for the handling of the given message by this handler.

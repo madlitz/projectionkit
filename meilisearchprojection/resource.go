@@ -2,11 +2,13 @@ package meilisearchprojection
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"time"
 
 	"github.com/dogmatiq/projectionkit/resource"
 	"github.com/meilisearch/meilisearch-go"
-	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 )
 
 // ResourceRepository is an implementation of resource.Repository that stores
@@ -17,7 +19,20 @@ type ResourceRepository struct {
 	occTable string
 }
 
+type resourceDoc struct {
+	ID      string `json:"id"`
+	Version string `json:"version"`
+}
+
 var _ resource.Repository = (*ResourceRepository)(nil)
+
+func hash(data ...string) string {
+	hash := sha256.New()
+	for _, d := range data {
+		hash.Write([]byte(d))
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
 
 // NewResourceRepository returns a new Meilisearch resource repository.
 func NewResourceRepository(
@@ -30,27 +45,21 @@ func NewResourceRepository(
 // ResourceVersion returns the version of the resource r.
 func (rr *ResourceRepository) ResourceVersion(ctx context.Context, r []byte) ([]byte, error) {
 
-	index := meilisearch.
+	occIndex := rr.db.Index(rr.occTable)
+	resourceID := hash(rr.key, string(r))
 
-	index
-
-		fmt.Sprintf(`MATCH (p:%s{handler: $handler, resource: $resource} )
-		RETURN p.version`, rr.occTable),
-		map[string]any{
-			"handler":  rr.key,
-			"resource": string(r),
-		},
-	)
-
+	var doc resourceDoc
+	err := occIndex.GetDocumentWithContext(ctx, resourceID, nil, &doc)
 	if err != nil {
+		if merr, ok := err.(*meilisearch.Error); ok {
+			if merr.StatusCode == 404 {
+				return nil, nil
+			}
+		}
 		return nil, err
 	}
 
-	if result.Next(ctx) {
-		return []byte(result.Record().Values[0].(string)), nil
-	}
-
-	return nil, nil
+	return []byte(doc.Version), nil
 
 }
 
@@ -58,19 +67,20 @@ func (rr *ResourceRepository) ResourceVersion(ctx context.Context, r []byte) ([]
 // the current version.
 func (rr *ResourceRepository) StoreResourceVersion(ctx context.Context, r, v []byte) error {
 
-	session := rr.db.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
-	defer session.Close(ctx)
+	occIndex := rr.db.Index(rr.occTable)
+	resourceID := hash(rr.key, string(r))
 
-	_, err := session.Run(ctx,
-		fmt.Sprintf(`MERGE (p:%s{handler: $handler, resource: $resource} )
-			SET p.version = $version
-			RETURN p.version`, rr.occTable,
-		),
-		map[string]any{
-			"version":  string(v),
-			"handler":  rr.key,
-			"resource": string(r),
-		})
+	task, err := occIndex.AddDocumentsWithContext(ctx, []map[string]string{
+		{
+			"id":      resourceID,
+			"version": string(v),
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	err = waitForTask(ctx, rr.db, task.TaskUID)
 	if err != nil {
 		return err
 	}
@@ -86,9 +96,7 @@ func (rr *ResourceRepository) UpdateResourceVersion(
 	r, c, n []byte,
 ) (ok bool, err error) {
 
-	return rr.withTx(ctx, func(tx neo4j.ExplicitTransaction) (bool, error) {
-		return rr.updateResourceVersion(ctx, tx, r, c, n)
-	})
+	return rr.updateResourceVersion(ctx, r, c, n)
 
 }
 
@@ -99,126 +107,108 @@ func (rr *ResourceRepository) UpdateResourceVersion(
 func (rr *ResourceRepository) UpdateResourceVersionFn(
 	ctx context.Context,
 	r, c, n []byte,
-	fn func(context.Context, meilisearch.ServiceManager) (bool, error),
+	fn func(context.Context, meilisearch.IndexManager) (bool, error),
 ) (ok bool, err error) {
-	return rr.withTx(ctx, func(db meilisearch.ServiceManager) (bool, error) {
-		ok, err = rr.updateResourceVersion(ctx, db, r, c, n)
-		if !ok || err != nil {
-			return false, err
-		}
 
-		return fn(ctx, db)
-	})
+	ok, err = fn(ctx, rr.db.Index(rr.key))
+	if err != nil {
+		return false, err
+	}
+
+	if !ok {
+		return false, nil
+	}
+
+	ok, err = rr.updateResourceVersion(ctx, r, c, n)
+	if !ok || err != nil {
+		return false, err
+	}
+
+	return true, nil
+
 }
 
 // UpdateResourceVersion updates the version of the resource r to n.
 //
 // If c is not the current version of r, it returns false and no update occurs.
 func (rr *ResourceRepository) updateResourceVersion(ctx context.Context,
-	db meilisearch.ServiceManager,
 	r, c, n []byte,
 ) (ok bool, err error) {
 
-	var result neo4j.ResultWithContext
+	occIndex := rr.db.Index(rr.occTable)
+	resourceID := hash(rr.key, string(r))
 
-	// If the new version is empty, delete the resource only if the current version matches.
-	if len(n) == 0 {
-		// First see if the resource exists with the current version.
-		result, err = tx.Run(ctx,
-			fmt.Sprintf(`MATCH (p:%s{handler: $handler, resource: $resource, version: $current_version} )
-			RETURN p`, rr.occTable),
-			map[string]any{
-				"handler":         rr.key,
-				"resource":        string(r),
-				"current_version": string(c),
-			},
-		)
-		if err != nil {
-			return false, err
-		}
-		exists := result.Next(ctx)
-
-		// Now delete the resource if it exists.
-		_, err = tx.Run(ctx,
-			fmt.Sprintf(`MATCH (p:%s{handler: $handler, resource: $resource, version: $current_version} )
-			DETACH DELETE p`, rr.occTable),
-			map[string]any{
-				"handler":         rr.key,
-				"resource":        string(r),
-				"current_version": string(c),
-			},
-		)
-		if err != nil {
-			return false, err
-		}
-
-		fmt.Printf("Deleting resource %v, version %v: %v \n", string(r), string(c), ok)
-		return exists, nil
-	}
-
-	// If resource does not exist, create it with the new version.
-	result, err = tx.Run(ctx,
-		fmt.Sprintf(`MATCH (p:%s{handler: $handler, resource: $resource} )
-		RETURN p`, rr.occTable),
-		map[string]any{
-			"handler":  rr.key,
-			"resource": string(r),
-		},
-	)
+	var doc resourceDoc
+	err = occIndex.GetDocumentWithContext(ctx, resourceID, nil, &doc)
 	if err != nil {
-		return false, err
+		if merr, ok := err.(*meilisearch.Error); ok {
+			if merr.StatusCode != 404 {
+				return false, err
+			}
+		}
 	}
 
-	// If resource does not exist, create it unconditionally
-	exists := result.Next(ctx)
-	if !exists && len(c) == 0 {
-		_, err = tx.Run(ctx,
-			fmt.Sprintf(`CREATE (p:%s{handler: $handler, resource: $resource, version: $version})`, rr.occTable),
-			map[string]any{
-				"handler":  rr.key,
-				"resource": string(r),
-				"version":  string(n),
-			},
-		)
-		if err != nil {
-			return false, err
+	if len(c) == 0 {
+		// If current version is not provided, check if the resource exists.
+		if doc.ID == "" {
+			// If resource does not exist, create it with the new version.
+			task, err := occIndex.AddDocumentsWithContext(ctx, []map[string]string{
+				{
+					"id":      resourceID,
+					"version": string(n),
+				},
+			})
+			if err != nil {
+				return false, err
+			}
+
+			err = waitForTask(ctx, rr.db, task.TaskUID)
+			if err != nil {
+				return false, err
+			}
+
+			return true, nil
+
 		}
-		return true, nil
+
+		return false, nil
 	}
 
 	// If the resource does exist, update it only if the current version matches.
-	result, err = tx.Run(ctx,
-		fmt.Sprintf(`MATCH (p:%s{handler: $handler, resource: $resource, version: $current_version})
-			SET p.version = $new_version
-			RETURN p`, rr.occTable,
-		),
-		map[string]any{
-			"current_version": string(c),
-			"new_version":     string(n),
-			"handler":         rr.key,
-			"resource":        string(r),
-		},
-	)
-	if err != nil {
-		return false, err
+	if doc.Version == string(c) {
+		task, err := occIndex.UpdateDocumentsWithContext(ctx, []resourceDoc{
+			{
+				ID:      resourceID,
+				Version: string(n),
+			},
+		})
+		if err != nil {
+			return false, err
+		}
+
+		err = waitForTask(ctx, rr.db, task.TaskUID)
+		if err != nil {
+			return false, err
+		}
+
+		return true, nil
 	}
 
-	return result.Next(ctx), nil
+	return false, nil
 }
 
 // DeleteResource removes all information about the resource r.
 func (rr *ResourceRepository) DeleteResource(ctx context.Context, r []byte) error {
 
-	session := rr.db.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
-	defer session.Close(ctx)
+	occIndex := rr.db.Index(rr.occTable)
+	resourceID := hash(rr.key, string(r))
 
-	_, err := session.Run(ctx,
-		fmt.Sprintf(`MATCH (p:%s{handler: $handler, resource: $resource})
-		DELETE p`, rr.occTable),
-		map[string]interface{}{
-			"handler":  rr.key,
-			"resource": string(r),
-		})
+	task, err := occIndex.DeleteDocumentWithContext(ctx, resourceID)
+	if err != nil {
+		return err
+	}
+
+	err = waitForTask(ctx, rr.db, task.TaskUID)
 	if err != nil {
 		return err
 	}
@@ -227,32 +217,18 @@ func (rr *ResourceRepository) DeleteResource(ctx context.Context, r []byte) erro
 
 }
 
-// withTx calls fn on rr.db.
-//
-// fn is called within a transaction. The transaction is committed if fn returns
-// ok; otherwise, it is rolled back.
-func (rr *ResourceRepository) withTx(
-	ctx context.Context,
-	fn func(meilisearch.ServiceManager) (bool, error),
-) (bool, error) {
-	var ok bool
-
-	txID := uuid.New().String()
-
-	tx, err := session.BeginTransaction(ctx)
-	if err != nil {
-		return false, err
+func waitForTask(ctx context.Context, db meilisearch.ServiceManager, taskID int64) error {
+	for {
+		task, err := db.GetTaskWithContext(ctx, taskID)
+		if err != nil {
+			return err
+		}
+		if task.Status == "succeeded" {
+			return nil
+		}
+		if task.Status == "failed" {
+			return fmt.Errorf("task failed: %v", task.Error)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
-	defer tx.Rollback(ctx) // nolint:errcheck
-
-	ok, err = fn(index, txID)
-	if err != nil {
-		return false, err
-	}
-
-	if ok {
-		return true, tx.Commit(ctx)
-	}
-
-	return false, tx.Rollback(ctx)
 }
